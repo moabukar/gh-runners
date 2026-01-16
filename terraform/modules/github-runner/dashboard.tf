@@ -104,6 +104,4 @@ resource "aws_cloudwatch_dashboard" "runners" {
       }
     ]
   })
-
-  tags = local.tags
 }
