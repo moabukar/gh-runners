@@ -6,9 +6,18 @@ import os
 import time
 import random
 from datetime import datetime, timezone
+from functools import wraps
+from typing import Callable, Any
 import boto3
 import urllib.request
-import jwt
+import http.client
+
+try:
+    import jwt
+except ImportError:
+    # Fallback if PyJWT not available (should use Lambda layer)
+    jwt = None
+    logging.warning("PyJWT not available - Lambda layer may be missing")
 
 SECRET_ARN = os.environ["SECRET_ARN"]
 GITHUB_ORG = os.environ["GITHUB_ORG"]

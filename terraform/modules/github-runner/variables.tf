@@ -154,3 +154,25 @@ variable "alarm_sns_topic_arn" {
   default     = ""
   description = "SNS topic ARN for CloudWatch alarms"
 }
+
+variable "lambda_layer_arn" {
+  type        = string
+  default     = ""
+  description = "ARN of existing Lambda layer for Python dependencies (PyJWT, etc.). If empty, will create new layer from zip_path."
+}
+
+variable "lambda_layer_zip_path" {
+  type        = string
+  default     = ""
+  description = "Local path to Lambda layer zip file. Required if lambda_layer_arn is empty."
+}
+
+variable "lambda_reserved_concurrency" {
+  type        = number
+  default     = -1
+  description = "Reserved concurrent executions for Lambda functions (-1 for unreserved)"
+  validation {
+    condition     = var.lambda_reserved_concurrency == -1 || (var.lambda_reserved_concurrency > 0 && var.lambda_reserved_concurrency <= 1000)
+    error_message = "Reserved concurrency must be -1 (unreserved) or between 1 and 1000."
+  }
+}

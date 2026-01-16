@@ -5,7 +5,7 @@
 locals {
   lambda_runtime = "python3.11"
   lambda_timeout = 60
-  tags = merge(var.tags, { Module = "github-runner" })
+  tags           = merge(var.tags, { Module = "github-runner" })
 }
 
 
@@ -59,11 +59,11 @@ resource "aws_kms_alias" "sqs" {
 }
 
 resource "aws_sqs_queue" "webhook" {
-  name                       = "${var.prefix}-runner-webhook"
-  visibility_timeout_seconds = 120
-  message_retention_seconds  = 3600
-  receive_wait_time_seconds  = 10
-  kms_master_key_id          = aws_kms_key.sqs.arn
+  name                              = "${var.prefix}-runner-webhook"
+  visibility_timeout_seconds        = 120
+  message_retention_seconds         = 3600
+  receive_wait_time_seconds         = 10
+  kms_master_key_id                 = aws_kms_key.sqs.arn
   kms_data_key_reuse_period_seconds = 300
 
   redrive_policy = jsonencode({
@@ -75,11 +75,11 @@ resource "aws_sqs_queue" "webhook" {
 }
 
 resource "aws_sqs_queue" "webhook_dlq" {
-  name                      = "${var.prefix}-runner-webhook-dlq"
-  message_retention_seconds = 1209600
-  kms_master_key_id         = aws_kms_key.sqs.arn
+  name                              = "${var.prefix}-runner-webhook-dlq"
+  message_retention_seconds         = 1209600
+  kms_master_key_id                 = aws_kms_key.sqs.arn
   kms_data_key_reuse_period_seconds = 300
-  tags                      = local.tags
+  tags                              = local.tags
 }
 
 ################################################################################
@@ -138,6 +138,33 @@ resource "aws_lambda_permission" "api_gateway" {
 }
 
 ################################################################################
+# Lambda Layer for Python Dependencies
+################################################################################
+resource "aws_lambda_layer_version" "python_dependencies" {
+  count = var.lambda_layer_arn == "" ? 0 : 1
+
+  layer_name          = "${var.prefix}-python-dependencies"
+  filename            = var.lambda_layer_zip_path != "" ? var.lambda_layer_zip_path : null
+  source_code_hash    = var.lambda_layer_zip_path != "" ? filebase64sha256(var.lambda_layer_zip_path) : null
+  compatible_runtimes = [local.lambda_runtime]
+
+  description = "Python dependencies (PyJWT, boto3, cryptography) for GitHub runner Lambda functions"
+
+  tags = local.tags
+}
+
+data "aws_lambda_layer_version" "python_dependencies" {
+  count = var.lambda_layer_arn != "" ? 1 : 0
+
+  layer_name = split(":", var.lambda_layer_arn)[6]
+  version    = split(":", var.lambda_layer_arn)[7]
+}
+
+locals {
+  lambda_layers = var.lambda_layer_arn != "" ? [var.lambda_layer_arn] : (var.lambda_layer_zip_path != "" ? [aws_lambda_layer_version.python_dependencies[0].arn] : [])
+}
+
+################################################################################
 # Lambda - Webhook
 ################################################################################
 data "archive_file" "webhook" {
@@ -150,14 +177,16 @@ data "archive_file" "webhook" {
 }
 
 resource "aws_lambda_function" "webhook" {
-  function_name    = "${var.prefix}-runner-webhook"
-  role             = aws_iam_role.lambda_webhook.arn
-  handler          = "webhook.handler"
-  runtime          = local.lambda_runtime
-  timeout          = local.lambda_timeout
-  memory_size      = 256
-  filename         = data.archive_file.webhook.output_path
-  source_code_hash = data.archive_file.webhook.output_base64sha256
+  function_name                  = "${var.prefix}-runner-webhook"
+  role                           = aws_iam_role.lambda_webhook.arn
+  handler                        = "webhook.handler"
+  runtime                        = local.lambda_runtime
+  timeout                        = local.lambda_timeout
+  memory_size                    = 256
+  filename                       = data.archive_file.webhook.output_path
+  source_code_hash               = data.archive_file.webhook.output_base64sha256
+  layers                         = local.lambda_layers
+  reserved_concurrent_executions = var.lambda_reserved_concurrency
 
   dead_letter_config {
     target_arn = aws_sqs_queue.webhook_dlq.arn
@@ -188,14 +217,16 @@ data "archive_file" "scale_up" {
 }
 
 resource "aws_lambda_function" "scale_up" {
-  function_name    = "${var.prefix}-runner-scale-up"
-  role             = aws_iam_role.lambda_scale_up.arn
-  handler          = "scale_up.handler"
-  runtime          = local.lambda_runtime
-  timeout          = local.lambda_timeout
-  memory_size      = 512
-  filename         = data.archive_file.scale_up.output_path
-  source_code_hash = data.archive_file.scale_up.output_base64sha256
+  function_name                  = "${var.prefix}-runner-scale-up"
+  role                           = aws_iam_role.lambda_scale_up.arn
+  handler                        = "scale_up.handler"
+  runtime                        = local.lambda_runtime
+  timeout                        = local.lambda_timeout
+  memory_size                    = 512
+  filename                       = data.archive_file.scale_up.output_path
+  source_code_hash               = data.archive_file.scale_up.output_base64sha256
+  layers                         = local.lambda_layers
+  reserved_concurrent_executions = var.lambda_reserved_concurrency
 
   dead_letter_config {
     target_arn = aws_sqs_queue.webhook_dlq.arn
@@ -241,14 +272,16 @@ data "archive_file" "scale_down" {
 }
 
 resource "aws_lambda_function" "scale_down" {
-  function_name    = "${var.prefix}-runner-scale-down"
-  role             = aws_iam_role.lambda_scale_down.arn
-  handler          = "scale_down.handler"
-  runtime          = local.lambda_runtime
-  timeout          = local.lambda_timeout
-  memory_size      = 256
-  filename         = data.archive_file.scale_down.output_path
-  source_code_hash = data.archive_file.scale_down.output_base64sha256
+  function_name                  = "${var.prefix}-runner-scale-down"
+  role                           = aws_iam_role.lambda_scale_down.arn
+  handler                        = "scale_down.handler"
+  runtime                        = local.lambda_runtime
+  timeout                        = local.lambda_timeout
+  memory_size                    = 256
+  filename                       = data.archive_file.scale_down.output_path
+  source_code_hash               = data.archive_file.scale_down.output_base64sha256
+  layers                         = local.lambda_layers
+  reserved_concurrent_executions = var.lambda_reserved_concurrency
 
   environment {
     variables = {
@@ -437,8 +470,8 @@ resource "aws_iam_role_policy" "lambda_scale_up" {
         Resource = aws_secretsmanager_secret.github_app.arn
       },
       {
-        Effect   = "Allow"
-        Action   = ["ec2:RunInstances", "ec2:CreateTags"]
+        Effect = "Allow"
+        Action = ["ec2:RunInstances", "ec2:CreateTags"]
         Resource = [
           "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:instance/*",
           "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:volume/*",
@@ -556,8 +589,8 @@ resource "aws_cloudwatch_log_group" "lambda_scale_down" {
 # CloudWatch Alarms
 ################################################################################
 resource "aws_cloudwatch_metric_alarm" "lambda_webhook_errors" {
-  name          = "${var.prefix}-runner-webhook-errors"
-  alarm_description = "Alert on Lambda webhook errors"
+  name                = "${var.prefix}-runner-webhook-errors"
+  alarm_description   = "Alert on Lambda webhook errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "Errors"
@@ -575,8 +608,8 @@ resource "aws_cloudwatch_metric_alarm" "lambda_webhook_errors" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "lambda_scale_up_errors" {
-  name          = "${var.prefix}-runner-scale-up-errors"
-  alarm_description = "Alert on Lambda scale-up errors"
+  name                = "${var.prefix}-runner-scale-up-errors"
+  alarm_description   = "Alert on Lambda scale-up errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "Errors"
@@ -594,8 +627,8 @@ resource "aws_cloudwatch_metric_alarm" "lambda_scale_up_errors" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "sqs_dlq_messages" {
-  name          = "${var.prefix}-runner-sqs-dlq-messages"
-  alarm_description = "Alert when messages arrive in DLQ"
+  name                = "${var.prefix}-runner-sqs-dlq-messages"
+  alarm_description   = "Alert when messages arrive in DLQ"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "ApproximateNumberOfMessagesVisible"
