@@ -108,6 +108,30 @@ resource "aws_apigatewayv2_stage" "webhook" {
       ip             = "$context.identity.sourceIp"
       requestTime    = "$context.requestTime"
       httpMethod     = "$context.httpMethod"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      responseLength = "$context.responseLength"
+      integrationErrorMessage = "$context.integrationErrorMessage"
+    })
+  }
+
+  dynamic "default_route_settings" {
+    for_each = var.enable_xray ? [1] : []
+    content {
+      detailed_metrics_enabled = true
+    }
+  }
+
+  tags = local.tags
+}
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_gateway.arn
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      ip             = "$context.identity.sourceIp"
+      requestTime    = "$context.requestTime"
+      httpMethod     = "$context.httpMethod"
       status         = "$context.status"
       responseLength = "$context.responseLength"
     })
@@ -187,6 +211,9 @@ resource "aws_lambda_function" "webhook" {
   source_code_hash               = data.archive_file.webhook.output_base64sha256
   layers                         = local.lambda_layers
   reserved_concurrent_executions = var.lambda_reserved_concurrency
+  tracing_config {
+    mode = var.enable_xray ? "Active" : "PassThrough"
+  }
 
   dead_letter_config {
     target_arn = aws_sqs_queue.webhook_dlq.arn
@@ -613,6 +640,11 @@ resource "aws_iam_role_policy" "lambda_scale_down" {
             "ec2:ResourceTag/Purpose" = "github-runner"
           }
         }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+        Resource = "*"
       }
     ], var.lambda_vpc_config != null ? [{
       Effect = "Allow"
