@@ -176,3 +176,18 @@ variable "lambda_reserved_concurrency" {
     error_message = "Reserved concurrency must be -1 (unreserved) or between 1 and 1000."
   }
 }
+
+variable "enable_dashboard" {
+  type        = bool
+  default     = true
+  description = "Enable CloudWatch dashboard"
+}
+
+variable "lambda_vpc_config" {
+  type = object({
+    subnet_ids         = list(string)
+    security_group_ids = list(string)
+  })
+  default     = null
+  description = "Optional VPC configuration for Lambda functions (needed for VPC endpoints or private resources)"
+}

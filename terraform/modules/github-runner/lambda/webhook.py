@@ -34,6 +34,9 @@ def verify_signature(payload, signature):
 
 def handler(event, context):
     """Handle GitHub webhook events."""
+    request_id = context.aws_request_id if context else "unknown"
+    logger.info(f"[{request_id}] Processing webhook event")
+    
     try:
         body = event.get("body", "")
         if event.get("isBase64Encoded"):
@@ -41,40 +44,73 @@ def handler(event, context):
             body = base64.b64decode(body).decode()
         
         headers = {k.lower(): v for k, v in event.get("headers", {}).items()}
+        github_event = headers.get("x-github-event", "")
+        github_delivery = headers.get("x-github-delivery", "unknown")
+        
+        logger.info(f"[{request_id}] Event: {github_event}, Delivery: {github_delivery}")
         
         if not verify_signature(body.encode(), headers.get("x-hub-signature-256", "")):
-            logger.warning("Invalid webhook signature")
-            return {"statusCode": 401, "body": json.dumps({"error": "Invalid signature"})}
+            logger.warning(f"[{request_id}] Invalid webhook signature for delivery {github_delivery}")
+            return {
+                "statusCode": 401,
+                "body": json.dumps({"error": "Invalid signature", "request_id": request_id})
+            }
         
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in webhook: {e}")
-            return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON"})}
+            logger.error(f"[{request_id}] Invalid JSON in webhook: {e}", exc_info=True)
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Invalid JSON", "request_id": request_id, "details": str(e)})
+            }
         
-        if headers.get("x-github-event") != "workflow_job":
-            return {"statusCode": 200, "body": json.dumps({"message": "Ignored"})}
+        if github_event != "workflow_job":
+            logger.debug(f"[{request_id}] Ignoring event type: {github_event}")
+            return {"statusCode": 200, "body": json.dumps({"message": "Ignored", "event": github_event})}
         
         action = payload.get("action", "")
         job = payload.get("workflow_job", {})
+        job_id = job.get("id")
         job_labels = set(job.get("labels", []))
+        repository = payload.get("repository", {}).get("full_name", "unknown")
+        
+        logger.info(f"[{request_id}] Job {job_id} action={action}, repo={repository}, labels={job_labels}")
         
         if action != "queued" or not RUNNER_LABELS.intersection(job_labels):
-            return {"statusCode": 200, "body": json.dumps({"message": "Ignored"})}
+            logger.debug(f"[{request_id}] Job {job_id} ignored: action={action}, matching_labels={RUNNER_LABELS.intersection(job_labels)}")
+            return {
+                "statusCode": 200,
+                "body": json.dumps({"message": "Ignored", "reason": "action_or_labels"})
+            }
         
         message = {
-            "id": job.get("id"),
+            "id": job_id,
             "run_id": job.get("run_id"),
             "name": job.get("name"),
             "labels": list(job_labels),
-            "repository": payload.get("repository", {}).get("full_name"),
+            "repository": repository,
             "org": payload.get("organization", {}).get("login"),
         }
         
         sqs.send_message(QueueUrl=SQS_QUEUE_URL, MessageBody=json.dumps(message))
-        logger.info(f"Queued job {job.get('id')} for repository {message.get('repository')}")
-        return {"statusCode": 200, "body": json.dumps({"message": "Queued", "job_id": job.get("id")})}
+        logger.info(f"[{request_id}] Queued job {job_id} for repository {repository}")
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": "Queued",
+                "job_id": job_id,
+                "request_id": request_id
+            })
+        }
         
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}", exc_info=True)
-        return {"statusCode": 500, "body": json.dumps({"error": "Internal server error"})}
+        logger.error(f"[{request_id}] Error processing webhook: {e}", exc_info=True)
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "error": "Internal server error",
+                "request_id": request_id,
+                "type": type(e).__name__
+            })
+        }

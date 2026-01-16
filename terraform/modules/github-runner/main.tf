@@ -141,11 +141,11 @@ resource "aws_lambda_permission" "api_gateway" {
 # Lambda Layer for Python Dependencies
 ################################################################################
 resource "aws_lambda_layer_version" "python_dependencies" {
-  count = var.lambda_layer_arn == "" ? 0 : 1
+  count = var.lambda_layer_arn == "" && var.lambda_layer_zip_path != "" ? 1 : 0
 
   layer_name          = "${var.prefix}-python-dependencies"
-  filename            = var.lambda_layer_zip_path != "" ? var.lambda_layer_zip_path : null
-  source_code_hash    = var.lambda_layer_zip_path != "" ? filebase64sha256(var.lambda_layer_zip_path) : null
+  filename            = var.lambda_layer_zip_path
+  source_code_hash    = filebase64sha256(var.lambda_layer_zip_path)
   compatible_runtimes = [local.lambda_runtime]
 
   description = "Python dependencies (PyJWT, boto3, cryptography) for GitHub runner Lambda functions"
@@ -161,7 +161,7 @@ data "aws_lambda_layer_version" "python_dependencies" {
 }
 
 locals {
-  lambda_layers = var.lambda_layer_arn != "" ? [var.lambda_layer_arn] : (var.lambda_layer_zip_path != "" ? [aws_lambda_layer_version.python_dependencies[0].arn] : [])
+  lambda_layers = var.lambda_layer_arn != "" ? [var.lambda_layer_arn] : (var.lambda_layer_zip_path != "" && length(aws_lambda_layer_version.python_dependencies) > 0 ? [aws_lambda_layer_version.python_dependencies[0].arn] : [])
 }
 
 ################################################################################
@@ -198,6 +198,14 @@ resource "aws_lambda_function" "webhook" {
       SECRET_ARN    = aws_secretsmanager_secret.github_app.arn
       RUNNER_LABELS = join(",", var.runner_labels)
       LOG_LEVEL     = var.log_level
+    }
+  }
+
+  dynamic "vpc_config" {
+    for_each = var.lambda_vpc_config != null ? [var.lambda_vpc_config] : []
+    content {
+      subnet_ids         = vpc_config.value.subnet_ids
+      security_group_ids = vpc_config.value.security_group_ids
     }
   }
 
@@ -250,6 +258,14 @@ resource "aws_lambda_function" "scale_up" {
     }
   }
 
+  dynamic "vpc_config" {
+    for_each = var.lambda_vpc_config != null ? [var.lambda_vpc_config] : []
+    content {
+      subnet_ids         = vpc_config.value.subnet_ids
+      security_group_ids = vpc_config.value.security_group_ids
+    }
+  }
+
   tags = local.tags
 }
 
@@ -290,6 +306,14 @@ resource "aws_lambda_function" "scale_down" {
       PREFIX                = var.prefix
       MIN_RUNNING_TIME_MINS = tostring(var.minimum_running_time_in_minutes)
       LOG_LEVEL             = var.log_level
+    }
+  }
+
+  dynamic "vpc_config" {
+    for_each = var.lambda_vpc_config != null ? [var.lambda_vpc_config] : []
+    content {
+      subnet_ids         = vpc_config.value.subnet_ids
+      security_group_ids = vpc_config.value.security_group_ids
     }
   }
 
@@ -400,7 +424,7 @@ resource "aws_iam_role_policy" "lambda_webhook" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
@@ -421,7 +445,17 @@ resource "aws_iam_role_policy" "lambda_webhook" {
         Action   = ["kms:Decrypt"]
         Resource = aws_kms_key.sqs.arn
       }
-    ]
+    ], var.lambda_vpc_config != null ? [{
+      Effect = "Allow"
+      Action = [
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DeleteNetworkInterface",
+        "ec2:AssignPrivateIpAddresses",
+        "ec2:UnassignPrivateIpAddresses"
+      ]
+      Resource = "*"
+    }] : [])
   })
 }
 
@@ -458,6 +492,16 @@ resource "aws_iam_role_policy" "lambda_scale_up" {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = "GitHubRunners"
+          }
+        }
       },
       {
         Effect   = "Allow"
@@ -500,8 +544,24 @@ resource "aws_iam_role_policy" "lambda_scale_up" {
         Action   = ["kms:Decrypt"]
         Resource = aws_kms_key.sqs.arn
       }
-    ]
+    ], var.lambda_vpc_config != null ? [{
+      Effect = "Allow"
+      Action = [
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DeleteNetworkInterface",
+        "ec2:AssignPrivateIpAddresses",
+        "ec2:UnassignPrivateIpAddresses"
+      ]
+      Resource = "*"
+    }] : [])
   })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_scale_up_vpc" {
+  count      = var.lambda_vpc_config != null ? 1 : 0
+  role       = aws_iam_role.lambda_scale_up.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
 ################################################################################
@@ -528,7 +588,7 @@ resource "aws_iam_role_policy" "lambda_scale_down" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
@@ -554,8 +614,30 @@ resource "aws_iam_role_policy" "lambda_scale_down" {
           }
         }
       }
-    ]
+    ], var.lambda_vpc_config != null ? [{
+      Effect = "Allow"
+      Action = [
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DeleteNetworkInterface",
+        "ec2:AssignPrivateIpAddresses",
+        "ec2:UnassignPrivateIpAddresses"
+      ]
+      Resource = "*"
+    }] : [])
   })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_webhook_vpc" {
+  count      = var.lambda_vpc_config != null ? 1 : 0
+  role       = aws_iam_role.lambda_webhook.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_scale_down_vpc" {
+  count      = var.lambda_vpc_config != null ? 1 : 0
+  role       = aws_iam_role.lambda_scale_down.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
 ################################################################################

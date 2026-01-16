@@ -90,3 +90,32 @@ make terraform-validate # Validate Terraform config
 make build-layer       # Build Lambda layer
 make clean             # Clean temporary files
 ```
+
+### Lambda Layer Setup
+
+The Lambda functions require PyJWT for GitHub API authentication. Build the layer:
+
+```bash
+# Build the layer
+./build-lambda-layer.sh
+
+# Or using make
+make build-layer
+
+# In your terraform.tfvars or environment, set:
+# lambda_layer_zip_path = "./lambda-layer.zip"
+```
+
+Alternatively, use an existing layer ARN:
+```hcl
+lambda_layer_arn = "arn:aws:lambda:region:account:layer:name:version"
+```
+
+## Recent Improvements
+
+- ✅ Lambda layer support for PyJWT dependencies
+- ✅ Custom CloudWatch metrics for runner activity
+- ✅ GitHub API retry logic with rate limiting
+- ✅ CloudWatch dashboard for monitoring
+- ✅ Lambda reserved concurrency configuration
+- ✅ Enhanced error handling and logging

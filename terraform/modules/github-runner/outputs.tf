@@ -42,3 +42,13 @@ output "sqs_dlq_url" {
   value       = aws_sqs_queue.webhook_dlq.url
   description = "Dead-letter queue URL"
 }
+
+output "lambda_layer_arn" {
+  value       = length(local.lambda_layers) > 0 ? local.lambda_layers[0] : null
+  description = "Lambda layer ARN for Python dependencies"
+}
+
+output "cloudwatch_dashboard_url" {
+  value       = var.enable_dashboard && length(aws_cloudwatch_dashboard.runners) > 0 ? "https://${data.aws_region.current.name}.console.aws.amazon.com/cloudwatch/home?region=${data.aws_region.current.name}#dashboards:name=${aws_cloudwatch_dashboard.runners[0].dashboard_name}" : null
+  description = "URL to CloudWatch dashboard"
+}

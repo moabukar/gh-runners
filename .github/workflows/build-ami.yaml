@@ -17,6 +17,38 @@ permissions:
   contents: read
 
 jobs:
+  build-layer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build Lambda Layer
+        run: |
+          pip install -r terraform/modules/github-runner/lambda/requirements.txt --target lambda-layer/python
+          cd lambda-layer && zip -r ../lambda-layer.zip . && cd ..
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-2
+      - name: Publish Lambda Layer
+        id: publish-layer
+        run: |
+          LAYER_VERSION=$(aws lambda publish-layer-version \
+            --layer-name github-runners-python-deps \
+            --zip-file fileb://lambda-layer.zip \
+            --compatible-runtimes python3.11 \
+            --query 'Version' --output text)
+          LAYER_ARN=$(aws lambda get-layer-version \
+            --layer-name github-runners-python-deps \
+            --version-number $LAYER_VERSION \
+            --query 'LayerVersionArn' --output text)
+          echo "layer_arn=$LAYER_ARN" >> $GITHUB_OUTPUT
+          echo "Layer published: $LAYER_ARN"
+      - name: Output Layer ARN
+        run: echo "Layer ARN: ${{ steps.publish-layer.outputs.layer_arn }}"
+
   build:
     runs-on: ubuntu-latest
     steps:
