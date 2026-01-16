@@ -43,25 +43,6 @@ GitHub webhook → API Gateway → Lambda → SQS → Lambda → EC2 (ephemeral)
 | [docs/USAGE.md](docs/USAGE.md) | Developers – Using runners in workflows |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | DevOps – Monitoring, troubleshooting, maintenance |
 
-## Repository Structure
-
-```
-gh-runners/
-├── terraform/
-│   ├── modules/github-runner/    # Reusable module
-│   │   ├── main.tf               # Core resources
-│   │   ├── variables.tf          # Input variables
-│   │   ├── outputs.tf            # Outputs
-│   │   └── lambda/               # Lambda function code
-│   └── environments/
-│       └── prod/                 # Production config
-├── packer/                       # Custom AMI definition
-│   ├── github-runner.pkr.hcl
-│   └── scripts/
-├── docs/                         # Documentation
-└── .github/workflows/            # CI/CD pipelines
-```
-
 ## Requirements
 
 - AWS account with appropriate permissions
