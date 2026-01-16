@@ -69,11 +69,18 @@ def get_runner_registration_token():
         return json.loads(response.read())["token"]
 
 def count_running_runners():
-    response = ec2.describe_instances(Filters=[
+    """Count currently running or pending runner instances."""
+    paginator = ec2.get_paginator("describe_instances")
+    count = 0
+    
+    for page in paginator.paginate(Filters=[
         {"Name": "tag:Purpose", "Values": ["github-runner"]},
         {"Name": "instance-state-name", "Values": ["pending", "running"]},
-    ])
-    return sum(len(r.get("Instances", [])) for r in response.get("Reservations", []))
+    ]):
+        for reservation in page.get("Reservations", []):
+            count += len(reservation.get("Instances", []))
+    
+    return count
 
 def generate_user_data(registration_token, labels, runner_name):
     labels_str = ",".join(labels)
@@ -97,47 +104,84 @@ aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $(curl -s http:
     return base64.b64encode(script.encode()).decode()
 
 def launch_runner(job):
+    """Launch EC2 runner with fallback to multiple instance types."""
     registration_token = get_runner_registration_token()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     runner_name = f"runner-{timestamp}-{job.get('id', 'unknown')}"
     labels = list(set(RUNNER_LABELS + job.get("labels", [])))
     user_data = generate_user_data(registration_token, labels, runner_name)
     
-    params = {
-        "ImageId": AMI_ID,
-        "MinCount": 1,
-        "MaxCount": 1,
-        "SubnetId": random.choice(SUBNET_IDS),
-        "SecurityGroupIds": SECURITY_GROUP_IDS,
-        "UserData": user_data,
-        "IamInstanceProfile": {"Arn": INSTANCE_PROFILE_ARN},
-        "InstanceType": INSTANCE_TYPES[0],
-        "TagSpecifications": [{
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": runner_name},
-                {"Key": "Purpose", "Value": "github-runner"},
-                {"Key": "JobId", "Value": str(job.get("id", ""))},
-            ],
-        }],
-        "MetadataOptions": {"HttpTokens": "required", "HttpPutResponseHopLimit": 1, "HttpEndpoint": "enabled"},
-    }
+    # Try each instance type until one succeeds
+    last_error = None
+    for instance_type in INSTANCE_TYPES:
+        try:
+            params = {
+                "ImageId": AMI_ID,
+                "MinCount": 1,
+                "MaxCount": 1,
+                "SubnetId": random.choice(SUBNET_IDS),
+                "SecurityGroupIds": SECURITY_GROUP_IDS,
+                "UserData": user_data,
+                "IamInstanceProfile": {"Arn": INSTANCE_PROFILE_ARN},
+                "InstanceType": instance_type,
+                "TagSpecifications": [{
+                    "ResourceType": "instance",
+                    "Tags": [
+                        {"Key": "Name", "Value": runner_name},
+                        {"Key": "Purpose", "Value": "github-runner"},
+                        {"Key": "JobId", "Value": str(job.get("id", ""))},
+                    ],
+                }],
+                "MetadataOptions": {"HttpTokens": "required", "HttpPutResponseHopLimit": 1, "HttpEndpoint": "enabled"},
+            }
+            
+            if KEY_NAME:
+                params["KeyName"] = KEY_NAME
+            if SPOT_ENABLED:
+                params["InstanceMarketOptions"] = {
+                    "MarketType": "spot",
+                    "SpotOptions": {
+                        "SpotInstanceType": "one-time",
+                        "InstanceInterruptionBehavior": "terminate",
+                        "MaxPrice": ""  # Use current Spot price
+                    }
+                }
+            
+            response = ec2.run_instances(**params)
+            instance_id = response["Instances"][0]["InstanceId"]
+            logger.info(f"Launched {instance_id} (type: {instance_type}) for job {job.get('id')}")
+            return instance_id
+            
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Failed to launch {instance_type}: {e}, trying next type...")
+            continue
     
-    if KEY_NAME:
-        params["KeyName"] = KEY_NAME
-    if SPOT_ENABLED:
-        params["InstanceMarketOptions"] = {"MarketType": "spot", "SpotOptions": {"SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate"}}
-    
-    response = ec2.run_instances(**params)
-    instance_id = response["Instances"][0]["InstanceId"]
-    logger.info(f"Launched {instance_id} for job {job.get('id')}")
-    return instance_id
+    # All instance types failed
+    logger.error(f"Failed to launch runner for job {job.get('id')} with all instance types: {last_error}")
+    raise last_error
 
 def handler(event, context):
+    """Handle SQS messages to launch runners."""
+    results = {"launched": 0, "skipped": 0, "errors": 0}
+    
     for record in event.get("Records", []):
-        job = json.loads(record["body"])
-        if count_running_runners() >= RUNNERS_MAX:
-            logger.warning("Runner limit reached")
-            continue
-        launch_runner(job)
-    return {"statusCode": 200}
+        try:
+            job = json.loads(record["body"])
+            current_count = count_running_runners()
+            
+            if current_count >= RUNNERS_MAX:
+                logger.warning(f"Runner limit reached ({current_count}/{RUNNERS_MAX}), skipping job {job.get('id')}")
+                results["skipped"] += 1
+                continue
+            
+            launch_runner(job)
+            results["launched"] += 1
+            
+        except Exception as e:
+            logger.error(f"Error processing record: {e}", exc_info=True)
+            results["errors"] += 1
+            # Don't raise - let DLQ handle retries
+    
+    logger.info(f"Scale-up completed: {results}")
+    return {"statusCode": 200, "body": json.dumps(results)}

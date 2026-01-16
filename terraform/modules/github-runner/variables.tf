@@ -1,6 +1,10 @@
 variable "prefix" {
   type        = string
   description = "Prefix for all resource names"
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.prefix)) && length(var.prefix) <= 20
+    error_message = "Prefix must be lowercase alphanumeric with hyphens, max 20 chars."
+  }
 }
 
 variable "github_app" {
@@ -45,6 +49,10 @@ variable "runners_maximum_count" {
   type        = number
   default     = 10
   description = "Maximum concurrent runners"
+  validation {
+    condition     = var.runners_maximum_count > 0 && var.runners_maximum_count <= 100
+    error_message = "Runners maximum count must be between 1 and 100."
+  }
 }
 
 variable "minimum_running_time_in_minutes" {
@@ -117,10 +125,32 @@ variable "log_level" {
   type        = string
   default     = "INFO"
   description = "Lambda log level"
+  validation {
+    condition     = contains(["DEBUG", "INFO", "WARNING", "ERROR"], upper(var.log_level))
+    error_message = "Log level must be one of: DEBUG, INFO, WARNING, ERROR."
+  }
 }
 
 variable "tags" {
   type        = map(string)
   default     = {}
   description = "Additional tags"
+}
+
+variable "api_gateway_throttle_burst" {
+  type        = number
+  default     = 100
+  description = "API Gateway throttle burst limit"
+}
+
+variable "api_gateway_throttle_rate" {
+  type        = number
+  default     = 50
+  description = "API Gateway throttle rate limit"
+}
+
+variable "alarm_sns_topic_arn" {
+  type        = string
+  default     = ""
+  description = "SNS topic ARN for CloudWatch alarms"
 }

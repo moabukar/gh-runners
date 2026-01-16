@@ -14,22 +14,47 @@ logger = logging.getLogger()
 logger.setLevel(LOG_LEVEL)
 
 def handler(event, context):
-    response = ec2.describe_instances(Filters=[
-        {"Name": "tag:Purpose", "Values": ["github-runner"]},
-        {"Name": "instance-state-name", "Values": ["pending", "running"]},
-    ])
-    
-    terminated = 0
-    now = datetime.now(timezone.utc)
-    min_running = timedelta(minutes=MIN_RUNNING_TIME_MINS)
-    max_runtime = timedelta(hours=4)
-    
-    for reservation in response.get("Reservations", []):
-        for instance in reservation.get("Instances", []):
-            running_time = now - instance["LaunchTime"]
-            if running_time > max_runtime:
-                ec2.terminate_instances(InstanceIds=[instance["InstanceId"]])
-                logger.info(f"Terminated {instance['InstanceId']} - exceeded max runtime")
-                terminated += 1
-    
-    return {"statusCode": 200, "body": json.dumps({"terminated": terminated})}
+    """Terminate stale or orphaned runner instances."""
+    try:
+        paginator = ec2.get_paginator("describe_instances")
+        terminated = []
+        skipped = []
+        
+        now = datetime.now(timezone.utc)
+        min_running = timedelta(minutes=MIN_RUNNING_TIME_MINS)
+        max_runtime = timedelta(hours=4)
+        
+        for page in paginator.paginate(Filters=[
+            {"Name": "tag:Purpose", "Values": ["github-runner"]},
+            {"Name": "instance-state-name", "Values": ["pending", "running"]},
+        ]):
+            for reservation in page.get("Reservations", []):
+                for instance in reservation.get("Instances", []):
+                    instance_id = instance["InstanceId"]
+                    running_time = now - instance["LaunchTime"]
+                    
+                    # Skip instances that haven't been running long enough
+                    if running_time < min_running:
+                        skipped.append(instance_id)
+                        continue
+                    
+                    # Terminate instances exceeding max runtime
+                    if running_time > max_runtime:
+                        try:
+                            ec2.terminate_instances(InstanceIds=[instance_id])
+                            terminated.append(instance_id)
+                            logger.info(f"Terminated {instance_id} - exceeded max runtime ({running_time})")
+                        except Exception as e:
+                            logger.error(f"Failed to terminate {instance_id}: {e}")
+        
+        result = {
+            "terminated": len(terminated),
+            "terminated_ids": terminated,
+            "skipped": len(skipped)
+        }
+        logger.info(f"Scale-down completed: {result}")
+        return {"statusCode": 200, "body": json.dumps(result)}
+        
+    except Exception as e:
+        logger.error(f"Error in scale-down handler: {e}", exc_info=True)
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}

@@ -8,8 +8,6 @@ locals {
   tags = merge(var.tags, { Module = "github-runner" })
 }
 
-data "aws_region" "current" {}
-data "aws_caller_identity" "current" {}
 
 data "aws_ami" "runner" {
   most_recent = true
@@ -48,11 +46,25 @@ resource "aws_secretsmanager_secret_version" "github_app" {
 ################################################################################
 # SQS Queues
 ################################################################################
+resource "aws_kms_key" "sqs" {
+  description             = "KMS key for SQS encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  tags                    = local.tags
+}
+
+resource "aws_kms_alias" "sqs" {
+  name          = "alias/${var.prefix}-runner-sqs"
+  target_key_id = aws_kms_key.sqs.key_id
+}
+
 resource "aws_sqs_queue" "webhook" {
   name                       = "${var.prefix}-runner-webhook"
   visibility_timeout_seconds = 120
   message_retention_seconds  = 3600
   receive_wait_time_seconds  = 10
+  kms_master_key_id          = aws_kms_key.sqs.arn
+  kms_data_key_reuse_period_seconds = 300
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.webhook_dlq.arn
@@ -65,6 +77,8 @@ resource "aws_sqs_queue" "webhook" {
 resource "aws_sqs_queue" "webhook_dlq" {
   name                      = "${var.prefix}-runner-webhook-dlq"
   message_retention_seconds = 1209600
+  kms_master_key_id         = aws_kms_key.sqs.arn
+  kms_data_key_reuse_period_seconds = 300
   tags                      = local.tags
 }
 
@@ -82,6 +96,11 @@ resource "aws_apigatewayv2_stage" "webhook" {
   name        = "$default"
   auto_deploy = true
 
+  default_route_settings {
+    throttling_burst_limit = var.api_gateway_throttle_burst
+    throttling_rate_limit  = var.api_gateway_throttle_rate
+  }
+
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.api_gateway.arn
     format = jsonencode({
@@ -93,6 +112,8 @@ resource "aws_apigatewayv2_stage" "webhook" {
       responseLength = "$context.responseLength"
     })
   }
+
+  tags = local.tags
 }
 
 resource "aws_apigatewayv2_integration" "webhook" {
@@ -138,6 +159,10 @@ resource "aws_lambda_function" "webhook" {
   filename         = data.archive_file.webhook.output_path
   source_code_hash = data.archive_file.webhook.output_base64sha256
 
+  dead_letter_config {
+    target_arn = aws_sqs_queue.webhook_dlq.arn
+  }
+
   environment {
     variables = {
       SQS_QUEUE_URL = aws_sqs_queue.webhook.url
@@ -171,6 +196,10 @@ resource "aws_lambda_function" "scale_up" {
   memory_size      = 512
   filename         = data.archive_file.scale_up.output_path
   source_code_hash = data.archive_file.scale_up.output_base64sha256
+
+  dead_letter_config {
+    target_arn = aws_sqs_queue.webhook_dlq.arn
+  }
 
   environment {
     variables = {
@@ -342,7 +371,7 @@ resource "aws_iam_role_policy" "lambda_webhook" {
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:*:*:*"
+        Resource = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
       },
       {
         Effect   = "Allow"
@@ -353,6 +382,11 @@ resource "aws_iam_role_policy" "lambda_webhook" {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = aws_secretsmanager_secret.github_app.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = aws_kms_key.sqs.arn
       }
     ]
   })
@@ -376,6 +410,10 @@ resource "aws_iam_role" "lambda_scale_up" {
   tags = local.tags
 }
 
+data "aws_caller_identity" "current" {}
+
+data "aws_region" "current" {}
+
 resource "aws_iam_role_policy" "lambda_scale_up" {
   name = "scale-up-policy"
   role = aws_iam_role.lambda_scale_up.id
@@ -386,7 +424,7 @@ resource "aws_iam_role_policy" "lambda_scale_up" {
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:*:*:*"
+        Resource = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
       },
       {
         Effect   = "Allow"
@@ -400,13 +438,34 @@ resource "aws_iam_role_policy" "lambda_scale_up" {
       },
       {
         Effect   = "Allow"
-        Action   = ["ec2:RunInstances", "ec2:CreateTags", "ec2:DescribeInstances", "ec2:DescribeInstanceStatus"]
+        Action   = ["ec2:RunInstances", "ec2:CreateTags"]
+        Resource = [
+          "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:instance/*",
+          "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:volume/*",
+          "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:network-interface/*",
+          "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:launch-template/*",
+          "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:spot-instances-request/*"
+        ]
+        Condition = {
+          StringEquals = {
+            "ec2:InstanceType" = var.instance_types
+          }
+        }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeSpotInstanceRequests"]
         Resource = "*"
       },
       {
         Effect   = "Allow"
         Action   = ["iam:PassRole"]
         Resource = aws_iam_role.runner.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = aws_kms_key.sqs.arn
       }
     ]
   })
@@ -440,7 +499,7 @@ resource "aws_iam_role_policy" "lambda_scale_down" {
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:*:*:*"
+        Resource = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
       },
       {
         Effect   = "Allow"
@@ -449,8 +508,18 @@ resource "aws_iam_role_policy" "lambda_scale_down" {
       },
       {
         Effect   = "Allow"
-        Action   = ["ec2:DescribeInstances", "ec2:TerminateInstances"]
+        Action   = ["ec2:DescribeInstances"]
         Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ec2:TerminateInstances"]
+        Resource = "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Condition = {
+          StringEquals = {
+            "ec2:ResourceTag/Purpose" = "github-runner"
+          }
+        }
       }
     ]
   })
@@ -481,4 +550,64 @@ resource "aws_cloudwatch_log_group" "lambda_scale_down" {
   name              = "/aws/lambda/${var.prefix}-runner-scale-down"
   retention_in_days = var.log_retention_days
   tags              = local.tags
+}
+
+################################################################################
+# CloudWatch Alarms
+################################################################################
+resource "aws_cloudwatch_metric_alarm" "lambda_webhook_errors" {
+  name          = "${var.prefix}-runner-webhook-errors"
+  alarm_description = "Alert on Lambda webhook errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 5
+  alarm_actions       = var.alarm_sns_topic_arn != "" ? [var.alarm_sns_topic_arn] : []
+
+  dimensions = {
+    FunctionName = aws_lambda_function.webhook.function_name
+  }
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "lambda_scale_up_errors" {
+  name          = "${var.prefix}-runner-scale-up-errors"
+  alarm_description = "Alert on Lambda scale-up errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 5
+  alarm_actions       = var.alarm_sns_topic_arn != "" ? [var.alarm_sns_topic_arn] : []
+
+  dimensions = {
+    FunctionName = aws_lambda_function.scale_up.function_name
+  }
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "sqs_dlq_messages" {
+  name          = "${var.prefix}-runner-sqs-dlq-messages"
+  alarm_description = "Alert when messages arrive in DLQ"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_actions       = var.alarm_sns_topic_arn != "" ? [var.alarm_sns_topic_arn] : []
+
+  dimensions = {
+    QueueName = aws_sqs_queue.webhook_dlq.name
+  }
+
+  tags = local.tags
 }
