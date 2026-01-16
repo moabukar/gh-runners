@@ -18,6 +18,8 @@ manifest.json
 
 # Lambda
 *.zip
+lambda-layer/
+lambda-layer.zip
 
 # OS
 .DS_Store
