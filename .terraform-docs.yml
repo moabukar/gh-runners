@@ -1,0 +1,38 @@
+formatter: "markdown table"
+header-from: "main.tf"
+footer-from: ""
+sections:
+  show:
+    - header
+    - inputs
+    - outputs
+    - providers
+sort:
+  enabled: true
+  by: required
+content: ""
+output:
+  file: README.md
+  mode: inject
+  template: |-
+    {{ .Header }}
+    
+    {{ .Inputs }}
+    
+    {{ .Outputs }}
+    
+    {{ .Providers }}
+input:
+  enabled: true
+  description: ""
+output:
+  enabled: true
+  description: ""
+providers:
+  enabled: true
+  description: ""
+header:
+  enabled: true
+  from: "main.tf"
+  to: ""
+  custom: ""

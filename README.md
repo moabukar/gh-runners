@@ -56,3 +56,37 @@ With Spot instances (default):
 - 8 runners × m5.large × 8 hours/day × 22 days = ~£50-80/month
 - Scale to zero when idle = £0 outside working hours
 - NAT Gateway egress is the main fixed cost
+
+## Development
+
+### Pre-commit Hooks
+
+Install pre-commit hooks for code quality checks:
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install hooks
+pre-commit install
+
+# Run hooks manually
+pre-commit run --all-files
+```
+
+Hooks include:
+- Terraform formatting and validation
+- Python code formatting (Black, isort, flake8)
+- YAML/JSON validation
+- Security scanning (tfsec, checkov)
+- Linting (tflint)
+
+### Make Targets
+
+```bash
+make help              # Show all available targets
+make terraform-fmt     # Format Terraform files
+make terraform-validate # Validate Terraform config
+make build-layer       # Build Lambda layer
+make clean             # Clean temporary files
+```
